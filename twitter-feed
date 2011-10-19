@@ -1,0 +1,359 @@
+#!/usr/bin/python
+import sys
+if sys.hexversion <= 0x02070000:
+   sys.stderr.write("Error: python version 2.7 or better required\n")
+   sys.exit(1)
+
+import argparse
+import json
+import urllib
+import re
+import time
+from datetime import datetime, timedelta
+import htmlentitydefs
+
+##
+# Removes HTML or XML character references and entities from a text string.
+#
+# @param text The HTML (or XML) source text.
+# @return The plain text, as a Unicode string, if necessary.
+#
+# @Author Fredrik Lundh, http://effbot.org/zone/re-sub.htm
+#
+def unescape(text):
+  def fixup(m):
+    text = m.group(0)
+    if text[:2] == "&#":
+      # character reference
+      try:
+        if text[:3] == "&#x":
+          return unichr(int(text[3:-1], 16))
+        else:
+          return unichr(int(text[2:-1]))
+      except ValueError:
+        pass
+    else:
+      # named entity
+      try:
+        text = unichr(htmlentitydefs.name2codepoint[text[1:-1]])
+      except KeyError:
+        pass
+      return text # leave as is
+  return re.sub("&#?\w+;", fixup, text)
+
+class Tweet:
+  TextUrlRegex = re.compile("https?://[a-zA-Z0-9/._-]+")
+
+  def __init__(self, details):
+    self.details = details
+    self.text = unescape(details['text'])
+
+    match = Tweet.TextUrlRegex.search(self.text)
+    if match:
+      self.url = match.group(0).encode("ascii")
+    else:
+      self.url = None
+
+    # %z not supported in Python, so ignore timezone
+    self.date = datetime.strptime(details['created_at'][:-6], '%a, %d %b %Y %H:%M:%S')
+
+  def getUrl(self):
+    return self.url
+
+  def getText(self):
+    return self.text
+
+  def getDate(self):
+    return self.date
+
+  def getId(self):
+    return self.details['id']
+
+class TwitterFeed:
+  def __init__(self, query):
+    self.query = query
+    self.pageSize = 100
+    self.sinceId = None
+    self.maxAge = None
+
+  def setMaxAge(self, days):
+    self.maxAge = datetime.now() - timedelta(days = days)
+    return self
+
+  def tweets(self):
+    tweets = []
+    for page in range(1, 100):
+      if self.__fetch(tweets, page) < self.pageSize:
+        break;
+
+    if len(tweets) > 0:
+      self.sinceId = tweets[0].getId()
+
+    return tweets
+
+  def __fetch(self, tweets, page):
+    count = 0
+    params = { 'q' : self.query, 'type' : 'mixed', 'rpp' : self.pageSize, 'page' : page  }
+    if self.sinceId:
+      params['since_id'] = self.sinceId
+
+    encodedParams = urllib.urlencode(params)
+    file = urllib.urlopen("http://search.twitter.com/search.json?%s" % encodedParams)
+    data = json.loads(file.read())
+
+    if 'results' in data:
+      for tweetDetails in data['results']:
+        tweet = Tweet(tweetDetails)
+        if self.maxAge and tweet.getDate() < self.maxAge:
+          break
+ 
+        count = count + 1
+        tweets.append(tweet);
+
+    return count
+
+##
+# See docs for BO.LT API here http://dev.bo.lt/
+#
+class BoltApiError(Exception):
+  def __init__(self, error):
+    self.error = error
+
+  def getType(self):
+    if 'type' in self.error:
+      return self.error['type']
+    return "unknown"
+
+  def __str__(self):
+    return repr(self.error)
+
+class Bolt:
+  def __init__(self, jsonBolt):
+    self.jsonBolt = jsonBolt
+
+  def getId(self):
+    return self.jsonBolt['id']
+
+  def getDefaultUrl(self):
+    return self.jsonBolt['default_url']
+
+class BoltPage:
+  def __init__(self, jsonPage):
+    self.jsonPage = jsonPage
+
+  def getId(self):
+    return self.jsonPage['id']
+
+  def getBoltId(self):
+    return self.jsonPage['bolt_id']
+
+  
+class BoltApi:
+  def __init__(self, token):
+    self.token = token
+    self.host = 'https://api.bo.lt/'
+    self.account = None
+
+  def setAccount(self, account):
+    self.account = account
+    return self
+
+  def setServer(self, server):
+    self.host = 'https://' + server
+    return self
+  
+  def findPageBySource(self, source):
+    result = self.__fetch('/page/find_by_source.json', { 'source' : source })
+    pages = []
+    if 'pages' in result:
+      for jsonPage in result['pages']:
+        pages.append(BoltPage(jsonPage))
+    return pages
+
+  def getBoltById(self, boltId):
+    result = self.__fetch('/bolt.json', { 'id' : boltId })
+    if not 'bolt' in result:
+      raise BoltApiError('No bolt found with id ' + boltId)
+    return Bolt(result['bolt'])
+
+  def createBolt(self, source, comment = None, path = None):
+    parameters = { 'url' : source }
+    if comment:
+      parameters['comment'] = comment
+    if path:
+      parameters['path'] = path
+
+    result = self.__fetch('/bolt/create.json', parameters)
+    if not 'bolt' in result:
+      raise BoltApiError('Unable to create bolt from url ' + url)
+    return Bolt(result['bolt'])
+
+  def comment(self, boltId, comment): 
+    result = self.__fetch('/bolt/comment.json', { 'id' : boltId, 'comment' : comment })
+    if not 'bolt' in result:
+      raise BoltApiError('Unable to add comment to bolt with id ' + boltId)
+    return Bolt(result['bolt'])
+
+  def __fetch(self, path, params):
+    params['access_token'] = self.token
+    if self.account:
+      params['account_id'] = self.account
+
+    encodedParams = urllib.urlencode(dict([k, v.encode('utf-8')] for k, v in params.items()))
+    file = urllib.urlopen(self.host + path + '?%s' % encodedParams)
+    data = json.loads(file.read())
+
+    if 'error' in data:
+      raise BoltApiError(data['error'])
+
+    return data
+
+
+class TwitterFeedWithUrlsOnly:
+  def __init__(self, feed):
+    self.feed = feed
+
+  def tweets(self):
+    # TODO: use list comprehension, once I comprehend
+    filteredTweets = []
+    for tweet in self.feed.tweets():
+      if tweet.getUrl():
+        filteredTweets.append(tweet)
+    
+    return filteredTweets
+
+class TwitterPrintAction:
+  def process(self, tweet):
+    print tweet.getUrl(), tweet.getText()
+
+class TwitterBoltAction:
+  def __init__(self, token):
+    self.api = BoltApi(token)
+
+  def setAccount(self, account):
+    self.api.setAccount(account)
+    return self
+
+  def setServer(self, server):
+    self.api.setServer(server)
+    return self
+
+  def process(self, tweet):
+    pages = self.api.findPageBySource(tweet.getUrl())
+    if len(pages) > 0:
+      bolt = self.api.getBoltById(pages[0].getBoltId())
+      print "bolt exists at ", bolt.getDefaultUrl(), "\tsource: ", tweet.getUrl()
+    else:
+      try:
+        bolt = self.api.createBolt(tweet.getUrl(), comment = tweet.getText())
+        print "bolt created at", bolt.getDefaultUrl(), "\tsource: ", tweet.getUrl()
+      except BoltApiError as error:
+        if error.getType() == 'PageException':
+          print "bolt unable to create at ", tweet.getUrl(), "skipping"
+        else:
+          raise
+
+class Controller:
+  def __init__(self, feed):
+    self.feed = feed
+    self.action = TwitterPrintAction()
+    self.polling = False
+    self.interval = 60
+    self.messageLevel = 1
+
+  def setAction(self, action):
+    self.action = action
+    return self
+  
+  def setInterval(self, interval):
+    self.interval = interval
+    return self
+
+  def enablePolling(self):
+    self.polling = True;
+    return self
+
+  def setQuiet(self):
+    self.messageLevel = 0
+    return self
+
+  def setVerbose(self):
+    self.messageLevel = 2
+    return self
+
+  def process(self):
+    newline = True
+
+    while True:
+      for tweet in reversed(self.feed.tweets()):
+        if self.messageLevel >= 2:
+          if not newline:
+            newline = True
+            print
+          print "tweet>", tweet.text
+
+        self.action.process(tweet)
+
+      if not self.polling:
+        break
+
+      if self.messageLevel >= 1:
+        newline = False
+        sys.stdout.write('.')
+        sys.stdout.flush()
+
+      time.sleep(self.interval)
+
+
+def main():
+  parser = argparse.ArgumentParser(
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    description = 'Bolt all the results of a twitter search for \'query\'.',
+    epilog="Examples:\n"
+      "  twitter-feed getbolt\n"
+      "  twitter-feed getbolt YOUR-ACCESS-TOKEN\n"
+      "Login to BO.LT and get your access token here https://bo.lt/app/settings#api-app-form (see  the 'API App Settings' section)")
+  parser.add_argument('-a', '--account', help = 'bolt account to which to add bolts (defaults to default account for token)')
+  parser.add_argument('-s', '--server', help = 'bolt server (defaults to api.bo.lt)')
+  parser.add_argument('-i', '--interval', help = 'twitter polling interval secondsi (default 60)', default = 60, type = int)
+  parser.add_argument('-d', '--days', help = 'maximum search back in days (default 1)', default = 1, type = int)
+  parser.add_argument('-q', '--quiet', help = 'don\'t print minimal messaging', action = 'store_true')
+  parser.add_argument('-p', '--poll', help = 'poll', action = 'store_true')
+  parser.add_argument('-v', '--verbose', help = 'print verbose messaging', action = 'store_true')
+  parser.add_argument("query", help = 'twitter query')
+  parser.add_argument("token", help = 'bolt access token (default none, which disables bolting)', nargs = '?')
+
+  args = parser.parse_args()
+
+  feed = TwitterFeed(args.query)
+  if args.days:
+    feed.setMaxAge(args.days)
+  feed = TwitterFeedWithUrlsOnly(feed)
+
+  controller = Controller(feed).setInterval(args.interval)
+  if args.quiet:
+    contoller.setQuiet()
+  if args.verbose:
+    controller.setVerbose()
+  if args.poll:
+    controller.enablePolling()
+  if args.token:
+    action = TwitterBoltAction(args.token)
+    if args.account:
+      action.setAccount(args.account)
+    if args.server:
+      action.setServer(args.server)
+    controller.setAction(action)
+
+  try:
+    controller.process()
+  except BoltApiError as error:
+    if error.getType() == 'ApiTokenException':
+      sys.stderr.write("Error: invalid api token\n")
+      sys.exit(1)
+    else:
+      raise
+
+if __name__ == "__main__":
+    main()
+
