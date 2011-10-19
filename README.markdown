@@ -7,10 +7,10 @@ twitter-feed
 The first step to really using `twitter-feed` is to get your token (Access Token):
 
   1. log into BO.LT (its free to create an account) 
-  2. go to [API App Settings section on the Settings page](https://bo.lt/app/settings#api-app-form). 
+  2. go to the [API App Settings section on the Settings page](https://bo.lt/app/settings#api-app-form). 
   3. provide an application name (anything will do, for example twitter-feed)
-  4. save your app
-  5. click 'Generate an access token for your App'
+  4. save your application
+  5. click *Generate an access token for your App*
 
 BO.LT
 =====
@@ -19,7 +19,7 @@ BO.LT
 
 When you put a page on BO.LT it is copied along with its assets onto our servers and deployed to our edge network.
 
-A page on our network is referred to as a bolt
+A page on the BO.LT network is referred to as a bolt
 
 A bolt:
 
