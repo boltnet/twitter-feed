@@ -35,4 +35,5 @@ A bolt:
   - can be setup to autmatically integrate your metrics provider
 
 
+Documentation on the BO.LT api can be found [here](http://dev.bo.lt)
 
